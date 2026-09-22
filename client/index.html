@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeFire Lite</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #87CEEB; font-family: Arial; }
+    #hud {
+      position: fixed; top: 10px; left: 10px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      padding: 12px 18px; border-radius: 8px;
+      font-size: 14px; line-height: 1.6; z-index: 10;
+    }
+    #hud b { color: #FFC107; }
+    #hp-bar-outer {
+      width: 200px; height: 16px; background: #333;
+      border: 2px solid #fff; border-radius: 10px;
+      overflow: hidden; margin-top: 6px;
+    }
+    #hp-bar {
+      width: 100%; height: 100%;
+      background: linear-gradient(90deg, #f44336, #4CAF50);
+      transition: width 0.2s;
+    }
+    #crosshair {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 24px; height: 24px; z-index: 9; pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ''; position: absolute; background: #fff;
+      box-shadow: 0 0 3px #000;
+    }
+    #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
+    #crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+
+    #hitmarker {
+      position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%) rotate(45deg);
+      width: 28px; height: 28px;
+      z-index: 9; pointer-events: none; opacity: 0;
+      transition: opacity 0.15s;
+    }
+    #hitmarker::before, #hitmarker::after {
+      content: ''; position: absolute; background: #ff0000;
+      width: 3px; height: 100%;
+    }
+    #hitmarker::before { left: 50%; transform: translateX(-50%); }
+    #hitmarker::after { top: 50%; transform: translateY(-50%) rotate(90deg); }
+
+    #damage-flash {
+      position: fixed; inset: 0; background: red;
+      opacity: 0; pointer-events: none; z-index: 8;
+      transition: opacity 0.3s;
+    }
+
+    #players-list {
+      position: fixed; top: 10px; right: 10px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      padding: 12px; border-radius: 8px;
+      font-size: 13px; z-index: 10; min-width: 200px;
+    }
+    #players-list h3 { margin: 0 0 8px; color: #FFC107; font-size: 14px; }
+    .p-item { padding: 3px 0; }
+
+    #killfeed {
+      position: fixed; top: 200px; right: 12px;
+      z-index: 10;
+      display: flex; flex-direction: column;
+      gap: 4px; align-items: flex-end;
+    }
+    .kill-msg {
+      background: rgba(0,0,0,0.75); color: #fff;
+      padding: 6px 12px; border-radius: 6px;
+      font-size: 13px; border-left: 3px solid #f44336;
+    }
+
+    #info {
+      position: fixed; bottom: 20px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7); color: #fff;
+      padding: 10px 20px; border-radius: 8px;
+      font-size: 14px; z-index: 10;
+    }
+  </style>
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+
+<div id="hud">
+  <div>HP: <b id="hp">100</b></div>
+  <div id="hp-bar-outer"><div id="hp-bar"></div></div>
+  <div style="margin-top:6px">Kills: <b id="kills">0</b></div>
+  <div>X: <b id="posX">0</b> Z: <b id="posZ">0</b></div>
+</div>
+<div id="crosshair"></div>
+<div id="hitmarker"></div>
+<div id="damage-flash"></div>
+<div id="killfeed"></div>
+<div id="players-list">
+  <h3>Online: <span id="pcount">1</span></h3>
+  <div id="plist"></div>
+</div>
+<div id="info">Klik di area game untuk mulai</div>
+
+<script>
+const socket = io();
+let myId = null;
+const otherPlayers = {};
+
+let scene, camera, renderer;
+
+let posX = 0, posY = 0, posZ = 0;
+let velocityY = 0;
+const GRAVITY = 25;
+const JUMP_POWER = 9;
+
+let yaw = 0;
+let pitch = 0;
+
+let isLocked = false;
+const keys = {};
+
+let hp = 100;
+let kills = 0;
+let lastShot = 0;
+const FIRE_RATE = 150;
+const RANGE = 60;
+const DAMAGE = 25;
+
+// ==========================================================
+// INIT THREE.JS
+// ==========================================================
+function initThree() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87CEEB);
+  scene.fog = new THREE.Fog(0x87CEEB, 60, 180);
+
+  camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 500);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  document.body.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(50, 100, 50);
+  sun.castShadow = true;
+  scene.add(sun);
+
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshStandardMaterial({ color: 0x4a7c3a })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  const grid = new THREE.GridHelper(400, 80, 0x2a4a1a, 0x2a4a1a);
+  grid.position.y = 0.02;
+  scene.add(grid);
+
+  [[10, 10], [-15, 20], [25, -15], [-20, -25], [15, -30], [-30, 5]].forEach(([x, z]) => {
+    const h = 4 + Math.random() * 4;
+    const box = new THREE.Mesh(
+      new THREE.BoxGeometry(4, h, 4),
+      new THREE.MeshStandardMaterial({ color: 0x8d6e63 })
+    );
+    box.position.set(x, h / 2, z);
+    box.castShadow = true;
+    scene.add(box);
+  });
+
+  const canvas = renderer.domElement;
+
+  // Klik untuk minta pointer lock
+  canvas.addEventListener('click', () => {
+    if (!isLocked) {
+      canvas.requestPointerLock();
+    }
+  });
+
+  document.addEventListener('pointerlockchange', () => {
+    isLocked = document.pointerLockElement === canvas;
+    document.getElementById('info').textContent = isLocked
+      ? 'W/A/S/D gerak | Space lompat | Klik kiri = TEMBAK'
+      : 'Klik di area game untuk mulai';
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!isLocked) return;
+    yaw -= e.movementX * 0.002;
+    pitch -= e.movementY * 0.002;
+    pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, pitch));
+  });
+
+  document.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.code === 'Space' && posY <= 0.01) {
+      velocityY = JUMP_POWER;
+    }
+  });
+  document.addEventListener('keyup', e => {
+    keys[e.key.toLowerCase()] = false;
+  });
+
+  // KLIK KIRI = TEMBAK
+  document.addEventListener('mousedown', e => {
+    if (e.button === 0 && isLocked) {
+      console.log('TEMBAK!');
+      tembak();
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}
+
+// ==========================================================
+// KARAKTER
+// ==========================================================
+function buatKarakter(color) {
+  const g = new THREE.Group();
+
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.4, 0.4, 1.5, 12),
+    new THREE.MeshStandardMaterial({ color })
+  );
+  body.position.y = 0.75;
+  body.castShadow = true;
+  g.add(body);
+
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.32, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0xffcc99 })
+  );
+  head.position.y = 1.95;
+  head.castShadow = true;
+  g.add(head);
+
+  return g;
+}
+
+// ==========================================================
+// TEMBAK
+// ==========================================================
+function tembak() {
+  const now = performance.now();
+  if (now - lastShot < FIRE_RATE) return;
+  lastShot = now;
+
+  const dir = new THREE.Vector3(0, 0, -1);
+  dir.applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+
+  const from = camera.position.clone().add(dir.clone().multiplyScalar(0.5));
+
+  socket.emit('shoot', {
+    fromX: from.x,
+    fromY: from.y,
+    fromZ: from.z,
+    dirX: dir.x,
+    dirY: dir.y,
+    dirZ: dir.z,
+    range: RANGE,
+    damage: DAMAGE
+  });
+
+  // Tracer kuning
+  const tracerMat = new THREE.LineBasicMaterial({ color: 0xffff00 });
+  const tracerGeo = new THREE.BufferGeometry().setFromPoints([
+    from,
+    from.clone().add(dir.clone().multiplyScalar(RANGE))
+  ]);
+  const tracer = new THREE.Line(tracerGeo, tracerMat);
+  scene.add(tracer);
+  setTimeout(() => scene.remove(tracer), 100);
+
+  pitch += 0.02;
+}
+
+// ==========================================================
+// SOCKET
+// ==========================================================
+socket.on('init', data => {
+  myId = data.id;
+  posX = data.players[myId].x;
+  posY = 0;
+  posZ = data.players[myId].z;
+  console.log('Init. My ID:', myId);
+
+  Object.keys(data.players).forEach(id => {
+    if (id === myId) return;
+    addOtherPlayer(data.players[id]);
+  });
+});
+
+socket.on('playerJoined', p => {
+  console.log('Player join:', p.name);
+  addOtherPlayer(p);
+});
+
+socket.on('playerLeft', id => {
+  if (otherPlayers[id]) {
+    scene.remove(otherPlayers[id]);
+    delete otherPlayers[id];
+  }
+});
+
+socket.on('state', players => {
+  Object.keys(players).forEach(id => {
+    if (id === myId) {
+      hp = players[id].hp;
+      kills = players[id].kills || 0;
+      updateHUD();
+      return;
+    }
+    if (!otherPlayers[id]) {
+      addOtherPlayer(players[id]);
+      return;
+    }
+    const mesh = otherPlayers[id];
+    mesh.targetPos = new THREE.Vector3(players[id].x, players[id].y || 0, players[id].z);
+    mesh.targetYaw = players[id].yaw;
+
+    const targetHp = players[id].hp;
+    mesh.children[0].material.color.setHex(targetHp > 50 ? 0x3366ff : 0xff3333);
+
+    mesh.visible = players[id].alive !== false;
+  });
+  updatePlayerList(players);
+});
+
+socket.on('playerShot', data => {
+  if (data.id === myId) return;
+  const from = new THREE.Vector3(data.fromX, data.fromY, data.fromZ);
+  const dir = new THREE.Vector3(data.dirX, data.dirY, data.dirZ);
+  const tracerMat = new THREE.LineBasicMaterial({ color: 0xff8800 });
+  const tracerGeo = new THREE.BufferGeometry().setFromPoints([
+    from,
+    from.clone().add(dir.clone().multiplyScalar(20))
+  ]);
+  const tracer = new THREE.Line(tracerGeo, tracerMat);
+  scene.add(tracer);
+  setTimeout(() => scene.remove(tracer), 100);
+});
+
+socket.on('hitConfirm', () => {
+  const el = document.getElementById('hitmarker');
+  el.style.opacity = '1';
+  setTimeout(() => el.style.opacity = '0', 150);
+});
+
+socket.on('takeDamage', () => {
+  const flash = document.getElementById('damage-flash');
+  flash.style.opacity = '0.5';
+  setTimeout(() => flash.style.opacity = '0', 200);
+});
+
+socket.on('killFeed', data => {
+  const el = document.getElementById('killfeed');
+  const msg = document.createElement('div');
+  msg.className = 'kill-msg';
+  msg.textContent = '💀 ' + data.killer + ' membunuh ' + data.victim;
+  el.appendChild(msg);
+  setTimeout(() => msg.remove(), 5000);
+});
+
+// ==========================================================
+// FUNGSI BANTU
+// ==========================================================
+function addOtherPlayer(p) {
+  const mesh = buatKarakter(0x3366ff);
+  mesh.position.set(p.x, p.y || 0, p.z);
+  mesh.targetPos = mesh.position.clone();
+  mesh.targetYaw = 0;
+  mesh.userData.name = p.name;
+  scene.add(mesh);
+  otherPlayers[p.id] = mesh;
+}
+
+function updatePlayerList(players) {
+  const el = document.getElementById('plist');
+  el.innerHTML = '';
+  Object.keys(players).forEach(id => {
+    const p = players[id];
+    const div = document.createElement('div');
+    div.className = 'p-item';
+    const hpText = p.alive === false ? 'MATI' : 'HP ' + Math.round(p.hp);
+    div.textContent = (id === myId ? '[YOU] ' : '') + p.name + ' - ' + hpText;
+    if (p.alive === false) div.style.color = '#888';
+    el.appendChild(div);
+  });
+  document.getElementById('pcount').textContent = Object.keys(players).length;
+}
+
+function updateHUD() {
+  document.getElementById('hp').textContent = Math.round(hp);
+  document.getElementById('hp-bar').style.width = Math.max(0, hp) + '%';
+  document.getElementById('kills').textContent = kills;
+}
+
+// ==========================================================
+// MAIN LOOP
+// ==========================================================
+let lastTime = performance.now();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  let inputX = 0, inputZ = 0;
+  if (keys['w']) inputZ -= 1;
+  if (keys['s']) inputZ += 1;
+  if (keys['a']) inputX -= 1;
+  if (keys['d']) inputX += 1;
+
+  const inputLen = Math.hypot(inputX, inputZ);
+  if (inputLen > 0) {
+    inputX /= inputLen;
+    inputZ /= inputLen;
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+    const moveX = -inputZ * sinY + inputX * cosY;
+    const moveZ = -inputZ * cosY - inputX * sinY;
+    const speed = 8;
+    posX += moveX * speed * dt;
+    posZ += moveZ * speed * dt;
+  }
+
+  velocityY -= GRAVITY * dt;
+  posY += velocityY * dt;
+  if (posY <= 0) { posY = 0; velocityY = 0; }
+
+  if (myId) socket.emit('move', { x: posX, y: posY, z: posZ, yaw });
+
+  const camOffset = new THREE.Vector3(0, 3, -6);
+  camOffset.applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+  camera.position.set(posX + camOffset.x, posY + camOffset.y, posZ + camOffset.z);
+  camera.lookAt(posX, posY + 1.5, posZ);
+
+  Object.values(otherPlayers).forEach(mesh => {
+    if (mesh.targetPos) mesh.position.lerp(mesh.targetPos, 0.25);
+    if (mesh.targetYaw !== undefined) {
+      mesh.rotation.y += (mesh.targetYaw - mesh.rotation.y) * 0.25;
+    }
+  });
+
+  document.getElementById('posX').textContent = posX.toFixed(1);
+  document.getElementById('posZ').textContent = posZ.toFixed(1);
+
+  renderer.render(scene, camera);
+}
+
+initThree();
+updateHUD();
+animate();
+</script>
+</body>
+</html>

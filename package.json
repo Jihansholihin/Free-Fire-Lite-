@@ -1,0 +1,17 @@
+{
+  "name": "freefire-lite",
+  "version": "0.1.0",
+  "description": "Battle Royale multiplayer ringan",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "nodemon server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
