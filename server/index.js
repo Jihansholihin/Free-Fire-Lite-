@@ -13,10 +13,91 @@ app.use(express.static(path.join(__dirname, '../client')));
 const players = {};
 let nextId = 1;
 
+// ==========================================================
+// ZONE STATE
+// ==========================================================
+const zone = {
+  x: 0,
+  z: 0,
+  radius: 100,
+  targetRadius: 100,
+  targetX: 0,
+  targetZ: 0,
+  phase: 'idle',        // 'idle' atau 'shrinking'
+  timer: 45,            // detik sebelum shrink berikutnya
+  damagePerSec: 5
+};
+
+function updateZone(dt) {
+  zone.timer -= dt;
+
+  if (zone.timer <= 0) {
+    if (zone.phase === 'idle') {
+      // Mulai shrink
+      zone.phase = 'shrinking';
+      zone.targetRadius = Math.max(8, zone.radius * 0.6);
+      zone.targetX = zone.x + (Math.random() - 0.5) * zone.radius * 0.6;
+      zone.targetZ = zone.z + (Math.random() - 0.5) * zone.radius * 0.6;
+    } else {
+      zone.phase = 'idle';
+      zone.timer = 30;
+    }
+  }
+
+  if (zone.phase === 'shrinking') {
+    const speed = 4; // unit/detik
+    const dx = zone.targetX - zone.x;
+    const dz = zone.targetZ - zone.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 0.5) {
+      zone.x += (dx / dist) * speed * dt;
+      zone.z += (dz / dist) * speed * dt;
+    }
+    if (zone.radius > zone.targetRadius) {
+      zone.radius -= speed * dt;
+      if (zone.radius < zone.targetRadius) zone.radius = zone.targetRadius;
+    } else {
+      zone.phase = 'idle';
+      zone.timer = 30;
+    }
+  }
+}
+
+function updateZoneDamage(dt) {
+  Object.values(players).forEach(p => {
+    if (!p.alive) return;
+    const dist = Math.hypot(p.x - zone.x, p.z - zone.z);
+    if (dist > zone.radius) {
+      p.hp -= zone.damagePerSec * dt;
+      if (p.hp <= 0) {
+        p.hp = 0;
+        p.alive = false;
+        io.emit('killFeed', {
+          killer: '☠️ ZONA',
+          victim: p.name
+        });
+        setTimeout(() => respawnPlayer(p), 3000);
+      }
+    }
+  });
+}
+
+function respawnPlayer(p) {
+  const angle = Math.random() * Math.PI * 2;
+  const dist = 6 + Math.random() * 4;
+  p.x = Math.cos(angle) * dist;
+  p.z = Math.sin(angle) * dist;
+  p.y = 0;
+  p.hp = 100;
+  p.alive = true;
+}
+
+// ==========================================================
+// SOCKET
+// ==========================================================
 io.on('connection', socket => {
   console.log('Player connected:', socket.id);
 
-  // Spawn DEKAT biar gampang test tembak
   const angle = Math.random() * Math.PI * 2;
   const dist = 6 + Math.random() * 4;
 
@@ -32,7 +113,7 @@ io.on('connection', socket => {
     alive: true
   };
 
-  socket.emit('init', { id: socket.id, players });
+  socket.emit('init', { id: socket.id, players, zone });
   socket.broadcast.emit('playerJoined', players[socket.id]);
 
   socket.on('move', data => {
@@ -67,16 +148,16 @@ io.on('connection', socket => {
       const proj = tx * dir.x + ty * dir.y + tz * dir.z;
       if (proj < 0 || proj > range) return;
 
-      const closestX = from.x + dir.x * proj;
-      const closestY = from.y + dir.y * proj;
-      const closestZ = from.z + dir.z * proj;
+      const cx = from.x + dir.x * proj;
+      const cy = from.y + dir.y * proj;
+      const cz = from.z + dir.z * proj;
 
-      const dx = target.x - closestX;
-      const dy = (target.y + 1) - closestY;
-      const dz = target.z - closestZ;
-      const distToLine = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      const dx = target.x - cx;
+      const dy = (target.y + 1) - cy;
+      const dz = target.z - cz;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
 
-      if (distToLine < 1.0 && proj < closestDist) {
+      if (d < 1.0 && proj < closestDist) {
         closestDist = proj;
         closestHit = target;
       }
@@ -84,48 +165,26 @@ io.on('connection', socket => {
 
     io.emit('playerShot', {
       id: shooter.id,
-      fromX: data.fromX,
-      fromY: data.fromY,
-      fromZ: data.fromZ,
-      dirX: data.dirX,
-      dirY: data.dirY,
-      dirZ: data.dirZ
+      fromX: data.fromX, fromY: data.fromY, fromZ: data.fromZ,
+      dirX: data.dirX, dirY: data.dirY, dirZ: data.dirZ
     });
 
     if (closestHit) {
       closestHit.hp -= damage;
-      console.log(shooter.name + ' hit ' + closestHit.name + ' -> HP ' + closestHit.hp);
-
       socket.emit('hitConfirm', { targetId: closestHit.id });
-
       io.to(closestHit.id).emit('takeDamage', {
-        from: shooter.id,
-        damage: damage,
-        hp: closestHit.hp
+        from: shooter.id, damage, hp: closestHit.hp
       });
 
       if (closestHit.hp <= 0) {
         closestHit.hp = 0;
         closestHit.alive = false;
         shooter.kills++;
-
         io.emit('killFeed', {
           killer: shooter.name,
           victim: closestHit.name
         });
-
-        setTimeout(() => {
-          if (players[closestHit.id]) {
-            const p = players[closestHit.id];
-            const a = Math.random() * Math.PI * 2;
-            const d = 6 + Math.random() * 4;
-            p.x = Math.cos(a) * d;
-            p.z = Math.sin(a) * d;
-            p.y = 0;
-            p.hp = 100;
-            p.alive = true;
-          }
-        }, 3000);
+        setTimeout(() => respawnPlayer(closestHit), 3000);
       }
     }
   });
@@ -137,11 +196,23 @@ io.on('connection', socket => {
   });
 });
 
+// ==========================================================
+// GAME LOOP
+// ==========================================================
+let lastTick = Date.now();
 setInterval(() => {
+  const now = Date.now();
+  const dt = (now - lastTick) / 1000;
+  lastTick = now;
+
+  updateZone(dt);
+  updateZoneDamage(dt);
+
   io.emit('state', players);
+  io.emit('zoneState', zone);
 }, 1000 / CONST.TICK_RATE);
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log('Server jalan di http://localhost:' + PORT);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Server jalan di port ' + PORT);
 });
